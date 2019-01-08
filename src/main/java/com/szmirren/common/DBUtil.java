@@ -6,14 +6,17 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import com.szmirren.models.AttributeCVF;
+import org.apache.log4j.Logger;
+
+import com.szmirren.entity.TableContent;
 import com.szmirren.models.DBType;
-import com.szmirren.models.DBTypeName;
-import com.szmirren.models.DatabaseConfig;
+import com.szmirren.models.TableAttributeEntity;
+import com.szmirren.options.DatabaseConfig;
 
 /**
  * 数据库工具
@@ -22,6 +25,7 @@ import com.szmirren.models.DatabaseConfig;
  *
  */
 public class DBUtil {
+	private static Logger LOG = Logger.getLogger(DBUtil.class);
 	private static final int DB_CONNECTION_TIMEOUTS_SECONDS = 1;
 
 	/**
@@ -77,7 +81,7 @@ public class DBUtil {
 		Connection conn = getConnection(config);
 		List<String> tables = new ArrayList<>();
 		ResultSet rs;
-		if (config.getDbType().equalsIgnoreCase(DBTypeName.SQL_SERVER.getValue())) {
+		if (config.getDbType().equalsIgnoreCase(Constant.SQL_SERVER)) {
 			// 如果是sqlserver数据库通过查询获得所有表跟视图
 			String sql = "select name from sysobjects  where xtype='u' or xtype='v' ";
 			rs = conn.createStatement().executeQuery(sql);
@@ -89,10 +93,11 @@ public class DBUtil {
 			// 如果非sqlserver类型的数据库通过JDBC获得所有表跟视图
 			DatabaseMetaData md = conn.getMetaData();
 			String[] types = {"TABLE", "VIEW"};
-			if (config.getDbType().equalsIgnoreCase(DBTypeName.POSTGRE_SQL.getValue())) {
+			if (config.getDbType().equalsIgnoreCase(Constant.POSTGRE_SQL)) {
 				rs = md.getTables(null, null, null, types);
 			} else {
-				rs = md.getTables(null, config.getUserName().toUpperCase(), null, types);
+				String catalog = conn.getCatalog() == null ? null : conn.getCatalog();
+				rs = md.getTables(catalog, config.getUserName().toUpperCase(), "%%", types);
 			}
 			while (rs.next()) {
 				tables.add(rs.getString(3));
@@ -101,61 +106,89 @@ public class DBUtil {
 
 		return tables;
 	}
-
 	/**
-	 * 获得所有列同时生成Attribute表模型
+	 * 获得指定表的属性
 	 * 
 	 * @param config
 	 * @param tableName
 	 * @return
 	 * @throws Exception
 	 */
-	public static List<AttributeCVF> getTableColumns(DatabaseConfig config, String tableName) throws Exception {
+	public static TableContent getTableAttribute(DatabaseConfig config, String tableName) throws Exception {
+		Connection conn = getConnection(config);
+		TableContent content = new TableContent();
+		ResultSet rs;
+		DatabaseMetaData md = conn.getMetaData();
+		String[] types = {"TABLE", "VIEW"};
+		if (config.getDbType().equalsIgnoreCase(Constant.POSTGRE_SQL)) {
+			rs = md.getTables(null, null, tableName, types);
+		} else {
+			String catalog = conn.getCatalog() == null ? null : conn.getCatalog();
+			rs = md.getTables(catalog, config.getUserName().toUpperCase(), tableName, types);
+		}
+		if (rs.next()) {
+			try {
+				content.setTableCat(rs.getString("TABLE_CAT"));
+				content.setTableSchem(rs.getString("TABLE_SCHEM"));
+				content.setTableName(rs.getString("TABLE_NAME"));
+				content.setTableType(rs.getString("TABLE_TYPE"));
+				content.setRemarks(rs.getString("REMARKS"));
+				content.setTypeCat(rs.getString("TYPE_CAT"));
+				content.setTypeSchem(rs.getString("TYPE_SCHEM"));
+				content.setTypeName(rs.getString("TYPE_NAME"));
+				content.setSelfReferencingColName(rs.getString("SELF_REFERENCING_COL_NAME"));
+				content.setRefGeneration(rs.getString("REF_GENERATION"));
+			} catch (Exception e) {
+				LOG.error("部分属性获取失败:", e);
+			}
+		}
+		return content;
+	}
+
+	/**
+	 * 获取表的列属性
+	 * 
+	 * @param config
+	 *          数据库配置文件
+	 * @param tableName
+	 *          表名
+	 * @return
+	 * @throws Exception
+	 */
+	public static List<TableAttributeEntity> getTableColumns(DatabaseConfig config, String tableName) throws Exception {
 		Connection conn = getConnection(config);
 		DatabaseMetaData md = conn.getMetaData();
-		ResultSet rs = md.getColumns(null, null, tableName, null);
-		Map<String, AttributeCVF> columnMap = new HashMap<>();
+
+		ResultSet rs = null;
+		if (config.getDbType().equalsIgnoreCase(Constant.MYSQL)) {
+			rs = md.getColumns(conn.getCatalog(), "%%", tableName, "%%");
+		} else {
+			rs = md.getColumns(null, null, tableName, null);
+		}
+		Map<String, TableAttributeEntity> columnMap = new HashMap<>();
 		while (rs.next()) {
-			AttributeCVF attribute = new AttributeCVF();
-			attribute.setConlumn(rs.getString("COLUMN_NAME"));
-			attribute.setComment(rs.getString("REMARKS"));
-			attribute.setJavaType(JavaType.jdbcTypeToJavaType(rs.getString("TYPE_NAME")));
-			attribute.setJdbcType(rs.getString("TYPE_NAME").toUpperCase());
-			attribute.setColumnSize(rs.getInt("COLUMN_SIZE"));
-			attribute.setColumnDefult(rs.getString("COLUMN_DEF"));
-			attribute.setNullable(rs.getInt("NULLABLE") == 0 ? false : true);
-			columnMap.put(rs.getString("COLUMN_NAME"), attribute);
+			TableAttributeEntity attr = new TableAttributeEntity();
+			try {
+				attr.setTdColumnName(rs.getString("COLUMN_NAME"));
+				attr.setTdJdbcType(rs.getString("TYPE_NAME"));
+				attr.setTdJavaType(JavaType.jdbcTypeToJavaType(rs.getString("TYPE_NAME")));
+
+				attr.setColumnDef(rs.getString("COLUMN_DEF"));
+				attr.setRemarks(rs.getString("REMARKS"));
+				attr.setColumnSize(rs.getInt("COLUMN_SIZE"));
+				attr.setDecimalDigits(rs.getInt("DECIMAL_DIGITS"));
+				attr.setOrdinalPosition(rs.getInt("ORDINAL_POSITION"));
+				attr.setNullable(rs.getInt("NULLABLE") == 1 ? true : false);
+				columnMap.put(rs.getString("COLUMN_NAME"), attr);
+			} catch (Exception e) {
+				LOG.error("部分属性获取失败:", e);
+			}
 		}
 		if (columnMap.size() == 0) {
 			throw new NullPointerException("从表中获取字段失败!获取不到任何字段!");
 		}
-		List<AttributeCVF> result = new ArrayList<>(columnMap.values());
-		// 将主键放在第一位
-		String key = null;
-		key = getTablePrimaryKey(config, tableName);
-		if (key != null) {
-			boolean anyKeyInFrist = false;
-			if (result.size() > 0) {
-				if (result.get(0).getConlumn() != null) {
-					if (result.get(0).getConlumn().equals(key)) {
-						anyKeyInFrist = true;
-					}
-				}
-			}
-			if (!anyKeyInFrist) {
-				int keyIndex = 0;
-				for (int i = 0; i < result.size(); i++) {
-					if (result.get(i).getConlumn() != null) {
-						if (result.get(i).getConlumn().equals(key)) {
-							keyIndex = i;
-							break;
-						}
-					}
-				}
-				result.add(0, result.remove(keyIndex));
-			}
-		}
-
+		ArrayList<TableAttributeEntity> result = new ArrayList<>(columnMap.values());
+		Collections.sort(result);
 		return result;
 	}
 
@@ -170,7 +203,12 @@ public class DBUtil {
 	public static String getTablePrimaryKey(DatabaseConfig config, String tableName) throws Exception {
 		Connection conn = getConnection(config);
 		DatabaseMetaData md = conn.getMetaData();
-		ResultSet rs = md.getPrimaryKeys(null, null, tableName);
+		ResultSet rs = null;
+		if (config.getDbType().equalsIgnoreCase(Constant.MYSQL)) {
+			rs = md.getPrimaryKeys(conn.getCatalog(), conn.getSchema(), tableName);
+		} else {
+			rs = md.getPrimaryKeys(null, null, tableName);
+		}
 		while (rs.next()) {
 			return rs.getString("COLUMN_NAME");
 		}
